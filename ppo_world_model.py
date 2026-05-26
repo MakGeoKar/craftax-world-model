@@ -289,6 +289,9 @@ def make_train(config):
                         pred_error = pred_error + config[
                             "WM_DISAGREEMENT_COEF"
                         ] * disagreement
+                    if config["USE_NORMALIZED_CURIOSITY"]:
+                        pred_error_mean = jnp.mean(pred_error)
+                        pred_error = pred_error / (pred_error_mean + 1e-8)
                     achievement_gate = jnp.ones_like(pred_error)
                     if config["USE_ACHIEVEMENT_GATED_CURIOSITY"]:
                         achievement_gate = achievement_gate + config[
@@ -980,6 +983,7 @@ if __name__ == "__main__":
     parser.add_argument("--achievement_gate_max", type=float, default=3.0)
     parser.add_argument("--use_dynamics_disagreement", action="store_true")
     parser.add_argument("--wm_disagreement_coef", type=float, default=1.0)
+    parser.add_argument("--use_normalized_curiosity", action="store_true")
     parser.add_argument("--use_tech_tree_bonus", action="store_true")
     parser.add_argument("--tech_tree_bonus_coef", type=float, default=0.02)
 
