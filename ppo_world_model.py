@@ -23,7 +23,7 @@ from orbax.checkpoint import (
 from logz.batch_logging import batch_log, create_log_dict
 from models.actor_critic import (
     ActorCritic,
-    ActorCriticConv,
+    ActorCriticConvWorldModel,
 )
 from models.icm import ICMEncoder, ICMForward, ICMInverse
 from wrappers import (
@@ -87,13 +87,26 @@ def make_train(config):
         if "Symbolic" in config["ENV_NAME"]:
             network = ActorCritic(env.action_space(env_params).n, config["LAYER_SIZE"])
         else:
-            network = ActorCriticConv(
+            network = ActorCriticConvWorldModel(
                 env.action_space(env_params).n, config["LAYER_SIZE"]
             )
 
         rng, _rng = jax.random.split(rng)
         init_x = jnp.zeros((1, *env.observation_space(env_params).shape))
-        network_params = network.init(_rng, init_x)
+        if "Symbolic" in config["ENV_NAME"]:
+            network_params = network.init(_rng, init_x)
+        else:
+            init_action = jnp.zeros((1,), dtype=jnp.int32)
+            next_init_x = init_x
+            network_params = network.init(
+                _rng, init_x, init_action, next_init_x, method=network.init_all
+            )
+
+        def policy_apply(params, obs):
+            if "Symbolic" in config["ENV_NAME"]:
+                return network.apply(params, obs)
+            pi, value, latent = network.apply(params, obs)
+            return pi, value
         if config["ANNEAL_LR"]:
             tx = optax.chain(
                 optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
@@ -217,7 +230,7 @@ def make_train(config):
 
                 # SELECT ACTION
                 rng, _rng = jax.random.split(rng)
-                pi, value = network.apply(train_state.params, last_obs)
+                pi, value = policy_apply(train_state.params, last_obs)
                 action = pi.sample(seed=_rng)
                 log_prob = pi.log_prob(action)
 
@@ -314,7 +327,7 @@ def make_train(config):
                 rng,
                 update_step,
             ) = runner_state
-            _, last_val = network.apply(train_state.params, last_obs)
+            _, last_val = policy_apply(train_state.params, last_obs)
 
             def _calculate_gae(traj_batch, last_val):
                 def _get_advantages(gae_and_next_value, transition):
@@ -350,7 +363,7 @@ def make_train(config):
                     # Policy/value network
                     def _loss_fn(params, traj_batch, gae, targets):
                         # RERUN NETWORK
-                        pi, value = network.apply(params, traj_batch.obs)
+                        pi, value = policy_apply(params, traj_batch.obs)
                         log_prob = pi.log_prob(traj_batch.action)
 
                         # CALCULATE VALUE LOSS
