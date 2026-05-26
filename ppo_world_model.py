@@ -363,7 +363,56 @@ def make_train(config):
                     # Policy/value network
                     def _loss_fn(params, traj_batch, gae, targets):
                         # RERUN NETWORK
-                        pi, value = policy_apply(params, traj_batch.obs)
+                        if "Symbolic" in config["ENV_NAME"]:
+                            pi, value = policy_apply(params, traj_batch.obs)
+                            wm_loss = 0.0
+                            wm_forward_loss = 0.0
+                            wm_reward_loss = 0.0
+                            wm_done_loss = 0.0
+                            wm_inverse_loss = 0.0
+                        else:
+                            pi, value, latent = network.apply(params, traj_batch.obs)
+                            _, _, next_latent = network.apply(
+                                params, traj_batch.next_obs
+                            )
+                            next_latent_target = jax.lax.stop_gradient(next_latent)
+                            pred_next_latent, pred_reward, pred_done_logit = (
+                                network.apply(
+                                    params,
+                                    latent,
+                                    traj_batch.action,
+                                    method=network.world_model,
+                                )
+                            )
+                            pred_action_logits = network.apply(
+                                params,
+                                latent,
+                                next_latent_target,
+                                method=network.inverse_model,
+                            )
+                            not_done = 1.0 - traj_batch.done
+                            wm_forward_loss = jnp.square(
+                                (pred_next_latent - next_latent_target)
+                                * not_done[..., None]
+                            ).mean()
+                            wm_reward_loss = jnp.square(
+                                (pred_reward - traj_batch.reward_e) * not_done
+                            ).mean()
+                            wm_done_loss = optax.sigmoid_binary_cross_entropy(
+                                pred_done_logit,
+                                traj_batch.done.astype(jnp.float32),
+                            ).mean()
+                            wm_inverse_loss = (
+                                optax.softmax_cross_entropy_with_integer_labels(
+                                    pred_action_logits, traj_batch.action
+                                ).mean()
+                            )
+                            wm_loss = (
+                                config["WM_FORWARD_COEF"] * wm_forward_loss
+                                + config["WM_REWARD_COEF"] * wm_reward_loss
+                                + config["WM_DONE_COEF"] * wm_done_loss
+                                + config["WM_INVERSE_COEF"] * wm_inverse_loss
+                            )
                         log_prob = pi.log_prob(traj_batch.action)
 
                         # CALCULATE VALUE LOSS
@@ -396,8 +445,17 @@ def make_train(config):
                             loss_actor
                             + config["VF_COEF"] * value_loss
                             - config["ENT_COEF"] * entropy
+                            + config["WM_COEF"] * wm_loss
                         )
-                        return total_loss, (value_loss, loss_actor, entropy)
+                        return total_loss, (
+                            value_loss,
+                            loss_actor,
+                            entropy,
+                            wm_forward_loss,
+                            wm_reward_loss,
+                            wm_done_loss,
+                            wm_inverse_loss,
+                        )
 
                     grad_fn = jax.value_and_grad(_loss_fn, has_aux=True)
                     total_loss, grads = grad_fn(
@@ -718,6 +776,13 @@ if __name__ == "__main__":
         "--use_optimistic_resets", action=argparse.BooleanOptionalAction, default=True
     )
     parser.add_argument("--optimistic_reset_ratio", type=int, default=16)
+
+    # WORLD MODEL
+    parser.add_argument("--wm_coef", type=float, default=1.0)
+    parser.add_argument("--wm_forward_coef", type=float, default=1.0)
+    parser.add_argument("--wm_reward_coef", type=float, default=1.0)
+    parser.add_argument("--wm_done_coef", type=float, default=0.1)
+    parser.add_argument("--wm_inverse_coef", type=float, default=0.1)
 
     # EXPLORATION
     parser.add_argument("--exploration_update_epochs", type=int, default=4)
