@@ -241,6 +241,21 @@ def make_train(config):
                 )
 
                 reward_i = jnp.zeros(config["NUM_ENVS"])
+                if "Symbolic" not in config["ENV_NAME"]:
+                    _, _, latent = network.apply(train_state.params, last_obs)
+                    _, _, next_latent = network.apply(train_state.params, obsv)
+                    next_latent = jax.lax.stop_gradient(next_latent)
+                    pred_next_latent, _, _ = network.apply(
+                        train_state.params,
+                        latent,
+                        action,
+                        method=network.world_model,
+                    )
+                    pred_error = jnp.square(pred_next_latent - next_latent).mean(
+                        axis=-1
+                    )
+                    pred_error = pred_error * (1.0 - done)
+                    reward_i = config["WM_INTRINSIC_COEF"] * pred_error
 
                 if config["TRAIN_ICM"]:
                     latent_obs = ex_state["icm_encoder"].apply_fn(
@@ -783,6 +798,7 @@ if __name__ == "__main__":
     parser.add_argument("--wm_reward_coef", type=float, default=1.0)
     parser.add_argument("--wm_done_coef", type=float, default=0.1)
     parser.add_argument("--wm_inverse_coef", type=float, default=0.1)
+    parser.add_argument("--wm_intrinsic_coef", type=float, default=0.01)
 
     # EXPLORATION
     parser.add_argument("--exploration_update_epochs", type=int, default=4)
