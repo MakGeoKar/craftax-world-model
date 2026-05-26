@@ -699,7 +699,7 @@ def make_train(config):
         runner_state, metric = jax.lax.scan(
             _update_step, runner_state, None, config["NUM_UPDATES"]
         )
-        return {"runner_state": runner_state}  # , "info": metric}
+        return {"runner_state": runner_state, "metric": metric}
 
     return train
 
@@ -727,6 +727,35 @@ def run_ppo(config):
     t0 = time.time()
     out = train_vmap(rngs)
     t1 = time.time()
+    metrics = jax.device_get(out["metric"])
+
+    print("Final metrics:")
+
+    def _path_to_str(path):
+        parts = []
+        for p in path:
+            if hasattr(p, "key"):
+                parts.append(str(p.key))
+            elif hasattr(p, "idx"):
+                parts.append(str(p.idx))
+            else:
+                parts.append(str(p))
+        return ".".join(parts) if parts else "metric"
+
+    for path, leaf in jax.tree_util.tree_leaves_with_path(metrics):
+        name = _path_to_str(path)
+        arr = np.asarray(leaf)
+        if arr.ndim == 0 or arr.size == 1:
+            print(f"  {name}: {float(arr.reshape(-1)[0])}")
+            continue
+        print(f"  {name}: shape={arr.shape}, mean={float(arr.mean()):.6f}")
+        update_axis = 1 if arr.ndim >= 2 else 0
+        last = np.take(arr, -1, axis=update_axis)
+        if last.ndim == 0 or last.size == 1:
+            print(f"  {name} (last update): {float(last.reshape(-1)[0]):.6f}")
+        else:
+            print(f"  {name} (last update): mean={float(last.mean()):.6f}")
+
     print("Time to run experiment", t1 - t0)
     print("SPS: ", config["TOTAL_TIMESTEPS"] / (t1 - t0))
 
