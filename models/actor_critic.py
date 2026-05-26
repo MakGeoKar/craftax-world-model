@@ -212,6 +212,25 @@ class ActorCriticConvWorldModel(nn.Module):
             name="wm_done",
         )
 
+        self.wm2_fc1 = nn.Dense(
+            self.layer_width,
+            kernel_init=orthogonal(2),
+            bias_init=constant(0.0),
+            name="wm2_fc1",
+        )
+        self.wm2_fc2 = nn.Dense(
+            self.layer_width,
+            kernel_init=orthogonal(2),
+            bias_init=constant(0.0),
+            name="wm2_fc2",
+        )
+        self.wm2_next_latent = nn.Dense(
+            self.layer_width,
+            kernel_init=orthogonal(1.0),
+            bias_init=constant(0.0),
+            name="wm2_next_latent",
+        )
+
         self.inv_fc1 = nn.Dense(
             self.layer_width,
             kernel_init=orthogonal(2),
@@ -275,6 +294,16 @@ class ActorCriticConvWorldModel(nn.Module):
             jnp.squeeze(pred_done_logit, axis=-1),
         )
 
+    def world_model_2(self, latent, action):
+        action_onehot = jax.nn.one_hot(action, self.action_dim)
+        x = jnp.concatenate([latent, action_onehot], axis=-1)
+        x = self.wm2_fc1(x)
+        x = nn.relu(x)
+        x = self.wm2_fc2(x)
+        x = nn.relu(x)
+        pred_next_latent = self.wm2_next_latent(x)
+        return pred_next_latent
+
     def inverse_model(self, latent, next_latent):
         x = jnp.concatenate([latent, next_latent], axis=-1)
         x = self.inv_fc1(x)
@@ -292,6 +321,7 @@ class ActorCriticConvWorldModel(nn.Module):
         pi, value, latent = self(obs)
         _, _, next_latent = self(next_obs)
         self.world_model(latent, action)
+        self.world_model_2(latent, action)
         self.inverse_model(latent, next_latent)
         return pi, value, latent
 

@@ -255,6 +255,20 @@ def make_train(config):
                         axis=-1
                     )
                     pred_error = pred_error * (1.0 - done)
+                    if config["USE_DYNAMICS_DISAGREEMENT"]:
+                        pred_next_latent_2 = network.apply(
+                            train_state.params,
+                            latent,
+                            action,
+                            method=network.world_model_2,
+                        )
+                        disagreement = jnp.square(
+                            pred_next_latent - pred_next_latent_2
+                        ).mean(axis=-1)
+                        disagreement = disagreement * (1.0 - done)
+                        pred_error = pred_error + config[
+                            "WM_DISAGREEMENT_COEF"
+                        ] * disagreement
                     achievement_gate = jnp.ones_like(pred_error)
                     if config["USE_ACHIEVEMENT_GATED_CURIOSITY"]:
                         achievement_gate = achievement_gate + config[
@@ -418,6 +432,7 @@ def make_train(config):
                             pi, value = policy_apply(params, traj_batch.obs)
                             wm_loss = 0.0
                             wm_forward_loss = 0.0
+                            wm_forward_loss_2 = 0.0
                             wm_reward_loss = 0.0
                             wm_done_loss = 0.0
                             wm_inverse_loss = 0.0
@@ -445,6 +460,16 @@ def make_train(config):
                             not_done = 1.0 - traj_batch.done
                             wm_forward_loss = jnp.square(
                                 (pred_next_latent - next_latent_target)
+                                * not_done[..., None]
+                            ).mean()
+                            pred_next_latent_2 = network.apply(
+                                params,
+                                latent,
+                                traj_batch.action,
+                                method=network.world_model_2,
+                            )
+                            wm_forward_loss_2 = jnp.square(
+                                (pred_next_latent_2 - next_latent_target)
                                 * not_done[..., None]
                             ).mean()
                             wm_reward_loss = jnp.square(
@@ -493,6 +518,7 @@ def make_train(config):
                             ).mean()
                             wm_loss = (
                                 config["WM_FORWARD_COEF"] * wm_forward_loss
+                                + config["WM_FORWARD_COEF"] * wm_forward_loss_2
                                 + config["WM_REWARD_COEF"] * wm_reward_loss
                                 + config["WM_DONE_COEF"] * wm_done_loss
                                 + config["WM_INVERSE_COEF"] * wm_inverse_loss
@@ -545,6 +571,7 @@ def make_train(config):
                             loss_actor,
                             entropy,
                             wm_forward_loss,
+                            wm_forward_loss_2,
                             wm_reward_loss,
                             wm_done_loss,
                             wm_inverse_loss,
@@ -615,6 +642,9 @@ def make_train(config):
                 / traj_batch.info["returned_episode"].sum(),
                 traj_batch.info,
             )
+            metric["reward_e_mean"] = traj_batch.reward_e.mean()
+            metric["reward_i_mean"] = traj_batch.reward_i.mean()
+            metric["reward_total_mean"] = traj_batch.reward.mean()
 
             rng = update_state[-1]
 
@@ -827,13 +857,13 @@ def run_ppo(config):
         if arr.ndim == 0 or arr.size == 1:
             print(f"  {name}: {float(arr.reshape(-1)[0])}")
             continue
-        print(f"  {name}: shape={arr.shape}, mean={float(arr.mean()):.6f}")
+        print(f"  {name}: shape={arr.shape}, mean={float(np.nanmean(arr)):.6f}")
         update_axis = 1 if arr.ndim >= 2 else 0
         last = np.take(arr, -1, axis=update_axis)
         if last.ndim == 0 or last.size == 1:
             print(f"  {name} (last update): {float(last.reshape(-1)[0]):.6f}")
         else:
-            print(f"  {name} (last update): mean={float(last.mean()):.6f}")
+            print(f"  {name} (last update): mean={float(np.nanmean(last)):.6f}")
 
     print("Time to run experiment", t1 - t0)
     print("SPS: ", config["TOTAL_TIMESTEPS"] / (t1 - t0))
@@ -912,6 +942,8 @@ if __name__ == "__main__":
     parser.add_argument("--use_achievement_gated_curiosity", action="store_true")
     parser.add_argument("--achievement_gate_coef", type=float, default=0.05)
     parser.add_argument("--achievement_gate_max", type=float, default=3.0)
+    parser.add_argument("--use_dynamics_disagreement", action="store_true")
+    parser.add_argument("--wm_disagreement_coef", type=float, default=1.0)
 
     # EXPLORATION
     parser.add_argument("--exploration_update_epochs", type=int, default=4)
