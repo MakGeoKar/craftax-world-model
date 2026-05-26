@@ -74,6 +74,25 @@ def make_train(config):
         env = AutoResetEnvWrapper(env)
         env = BatchEnvWrapper(env, num_envs=config["NUM_ENVS"])
 
+    if "Classic" in config["ENV_NAME"]:
+        from craftax.craftax_classic.constants import Achievement
+    else:
+        from craftax.craftax.constants import Achievement
+
+    tech_tree_achievement_indices = jnp.array(
+        [
+            Achievement.COLLECT_STONE.value,
+            Achievement.PLACE_TABLE.value,
+            Achievement.MAKE_WOOD_PICKAXE.value,
+            Achievement.MAKE_WOOD_SWORD.value,
+            Achievement.PLACE_FURNACE.value,
+        ],
+        dtype=jnp.int32,
+    )
+    tech_tree_achievement_weights = jnp.array(
+        [1.0, 1.0, 2.0, 2.0, 3.0], dtype=jnp.float32
+    )
+
     def linear_schedule(count):
         frac = (
             1.0
@@ -236,6 +255,7 @@ def make_train(config):
 
                 # STEP ENV
                 rng, _rng = jax.random.split(rng)
+                old_achievements = env_state.env_state.achievements
                 obsv, env_state, reward_e, done, info = env.step(
                     _rng, env_state, action, env_params
                 )
@@ -306,6 +326,19 @@ def make_train(config):
                     reward_i = (
                         config["WM_INTRINSIC_COEF"] * pred_error * achievement_gate
                     )
+
+                if config["USE_TECH_TREE_BONUS"]:
+                    new_achievements = env_state.env_state.achievements
+                    new_achievement_delta = jnp.clip(
+                        new_achievements - old_achievements, 0.0, 1.0
+                    )
+                    selected_delta = new_achievement_delta[
+                        :, tech_tree_achievement_indices
+                    ]
+                    tech_tree_bonus = jnp.sum(
+                        selected_delta * tech_tree_achievement_weights, axis=-1
+                    )
+                    reward_i = reward_i + config["TECH_TREE_BONUS_COEF"] * tech_tree_bonus
 
                 if config["TRAIN_ICM"]:
                     latent_obs = ex_state["icm_encoder"].apply_fn(
@@ -944,6 +977,8 @@ if __name__ == "__main__":
     parser.add_argument("--achievement_gate_max", type=float, default=3.0)
     parser.add_argument("--use_dynamics_disagreement", action="store_true")
     parser.add_argument("--wm_disagreement_coef", type=float, default=1.0)
+    parser.add_argument("--use_tech_tree_bonus", action="store_true")
+    parser.add_argument("--tech_tree_bonus_coef", type=float, default=0.02)
 
     # EXPLORATION
     parser.add_argument("--exploration_update_epochs", type=int, default=4)
