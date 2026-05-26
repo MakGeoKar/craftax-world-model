@@ -485,6 +485,7 @@ def make_train(config):
                             wm_inverse_loss = 0.0
                             wm_policy_consistency_loss = 0.0
                             wm_imagined_value_loss = 0.0
+                            imagined_actor_loss = 0.0
                         else:
                             pi, value, latent = network.apply(params, traj_batch.obs)
                             _, _, next_latent = network.apply(
@@ -592,6 +593,65 @@ def make_train(config):
                                 + config["WM_DONE_COEF"] * wm_done_loss
                                 + config["WM_INVERSE_COEF"] * wm_inverse_loss
                             )
+                            if config["USE_IMAGINED_ACTOR_LOSS"]:
+                                num_actions = pi.logits.shape[-1]
+                                all_actions = jnp.arange(num_actions)
+                                latent_flat = latent.reshape((-1, latent.shape[-1]))
+                                imagined_batch_size = latent_flat.shape[0]
+                                latent_all = jnp.repeat(
+                                    latent_flat[:, None, :], num_actions, axis=1
+                                )
+                                action_all = jnp.repeat(
+                                    all_actions[None, :], imagined_batch_size, axis=0
+                                )
+                                latent_all_flat = latent_all.reshape(
+                                    (-1, latent.shape[-1])
+                                )
+                                action_all_flat = action_all.reshape((-1,))
+                                (
+                                    pred_next_latent_all,
+                                    pred_reward_all,
+                                    pred_done_logit_all,
+                                ) = network.apply(
+                                    params,
+                                    latent_all_flat,
+                                    action_all_flat,
+                                    method=network.world_model,
+                                )
+                                next_value_all = network.apply(
+                                    params,
+                                    pred_next_latent_all,
+                                    method=network.value_from_latent,
+                                )
+                                pred_reward_all = pred_reward_all.reshape(
+                                    (imagined_batch_size, num_actions)
+                                )
+                                pred_done_prob_all = jax.nn.sigmoid(
+                                    pred_done_logit_all
+                                ).reshape((imagined_batch_size, num_actions))
+                                next_value_all = next_value_all.reshape(
+                                    (imagined_batch_size, num_actions)
+                                )
+                                q_model_all = (
+                                    pred_reward_all
+                                    + config["GAMMA"]
+                                    * (1.0 - pred_done_prob_all)
+                                    * next_value_all
+                                )
+                                q_model_all = jnp.clip(q_model_all, -10.0, 10.0)
+                                q_model_all = jax.lax.stop_gradient(q_model_all)
+                                pi_probs = pi.probs.reshape(
+                                    (imagined_batch_size, num_actions)
+                                )
+                                not_done_flat = not_done.reshape((-1,))
+                                imagined_actor_objective = jnp.sum(
+                                    pi_probs * q_model_all, axis=-1
+                                )
+                                imagined_actor_loss = -jnp.mean(
+                                    imagined_actor_objective * not_done_flat
+                                )
+                            else:
+                                imagined_actor_loss = 0.0
                         log_prob = pi.log_prob(traj_batch.action)
 
                         # CALCULATE VALUE LOSS
@@ -636,6 +696,7 @@ def make_train(config):
                             * wm_imagined_value_loss
                             + config["WM_POLICY_CONSISTENCY_COEF"]
                             * wm_policy_consistency_loss
+                            + config["IMAGINED_ACTOR_COEF"] * imagined_actor_loss
                         )
                         return total_loss, (
                             value_loss,
@@ -648,6 +709,7 @@ def make_train(config):
                             wm_inverse_loss,
                             wm_policy_consistency_loss,
                             wm_imagined_value_loss,
+                            imagined_actor_loss,
                         )
 
                     grad_fn = jax.value_and_grad(_loss_fn, has_aux=True)
@@ -1015,6 +1077,8 @@ if __name__ == "__main__":
     parser.add_argument("--wm_intrinsic_end_coef", type=float, default=0.001)
     parser.add_argument("--wm_imag_value_coef", type=float, default=0.1)
     parser.add_argument("--wm_imag_value_warmup_updates", type=int, default=10)
+    parser.add_argument("--use_imagined_actor_loss", action="store_true")
+    parser.add_argument("--imagined_actor_coef", type=float, default=0.01)
     parser.add_argument("--use_achievement_gated_curiosity", action="store_true")
     parser.add_argument("--achievement_gate_coef", type=float, default=0.05)
     parser.add_argument("--achievement_gate_max", type=float, default=3.0)
