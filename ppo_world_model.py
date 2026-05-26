@@ -326,9 +326,17 @@ def make_train(config):
                         achievement_gate = jnp.clip(
                             achievement_gate, 1.0, config["ACHIEVEMENT_GATE_MAX"]
                         )
-                    reward_i = (
-                        config["WM_INTRINSIC_COEF"] * pred_error * achievement_gate
-                    )
+                    if config["USE_ANNEALED_INTRINSIC"]:
+                        progress = update_step.astype(jnp.float32) / config[
+                            "NUM_UPDATES"
+                        ]
+                        intrinsic_coef = (
+                            config["WM_INTRINSIC_START_COEF"] * (1.0 - progress)
+                            + config["WM_INTRINSIC_END_COEF"] * progress
+                        )
+                    else:
+                        intrinsic_coef = config["WM_INTRINSIC_COEF"]
+                    reward_i = intrinsic_coef * pred_error * achievement_gate
 
                 if config["USE_TECH_TREE_BONUS"]:
                     new_achievements = env_state.env_state.achievements
@@ -976,6 +984,9 @@ if __name__ == "__main__":
     parser.add_argument("--wm_done_coef", type=float, default=0.1)
     parser.add_argument("--wm_inverse_coef", type=float, default=0.1)
     parser.add_argument("--wm_intrinsic_coef", type=float, default=0.01)
+    parser.add_argument("--use_annealed_intrinsic", action="store_true")
+    parser.add_argument("--wm_intrinsic_start_coef", type=float, default=0.006)
+    parser.add_argument("--wm_intrinsic_end_coef", type=float, default=0.001)
     parser.add_argument("--wm_imag_value_coef", type=float, default=0.1)
     parser.add_argument("--wm_imag_value_warmup_updates", type=int, default=10)
     parser.add_argument("--use_achievement_gated_curiosity", action="store_true")
