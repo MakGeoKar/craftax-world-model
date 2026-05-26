@@ -255,7 +255,43 @@ def make_train(config):
                         axis=-1
                     )
                     pred_error = pred_error * (1.0 - done)
-                    reward_i = config["WM_INTRINSIC_COEF"] * pred_error
+                    achievement_gate = jnp.ones_like(pred_error)
+                    if config["USE_ACHIEVEMENT_GATED_CURIOSITY"]:
+                        achievement_gate = achievement_gate + config[
+                            "ACHIEVEMENT_GATE_COEF"
+                        ] * (
+                            1.0
+                            * info.get(
+                                "Achievements/collect_stone",
+                                jnp.zeros_like(pred_error),
+                            )
+                            + 1.0
+                            * info.get(
+                                "Achievements/place_table",
+                                jnp.zeros_like(pred_error),
+                            )
+                            + 2.0
+                            * info.get(
+                                "Achievements/make_wood_pickaxe",
+                                jnp.zeros_like(pred_error),
+                            )
+                            + 2.0
+                            * info.get(
+                                "Achievements/make_wood_sword",
+                                jnp.zeros_like(pred_error),
+                            )
+                            + 3.0
+                            * info.get(
+                                "Achievements/place_furnace",
+                                jnp.zeros_like(pred_error),
+                            )
+                        )
+                        achievement_gate = jnp.clip(
+                            achievement_gate, 1.0, config["ACHIEVEMENT_GATE_MAX"]
+                        )
+                    reward_i = (
+                        config["WM_INTRINSIC_COEF"] * pred_error * achievement_gate
+                    )
 
                 if config["TRAIN_ICM"]:
                     latent_obs = ex_state["icm_encoder"].apply_fn(
@@ -873,6 +909,9 @@ if __name__ == "__main__":
     parser.add_argument("--wm_intrinsic_coef", type=float, default=0.01)
     parser.add_argument("--wm_imag_value_coef", type=float, default=0.1)
     parser.add_argument("--wm_imag_value_warmup_updates", type=int, default=10)
+    parser.add_argument("--use_achievement_gated_curiosity", action="store_true")
+    parser.add_argument("--achievement_gate_coef", type=float, default=0.05)
+    parser.add_argument("--achievement_gate_max", type=float, default=3.0)
 
     # EXPLORATION
     parser.add_argument("--exploration_update_epochs", type=int, default=4)
