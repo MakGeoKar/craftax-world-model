@@ -424,25 +424,36 @@ def make_train(config):
                                 ).mean()
                             )
                             done_prob = jax.nn.sigmoid(pred_done_logit)
+                            pred_reward_safe = jnp.clip(pred_reward, -5.0, 5.0)
+                            pred_next_latent_sg = jax.lax.stop_gradient(pred_next_latent)
                             next_value_imagined = network.apply(
                                 params,
-                                pred_next_latent,
+                                pred_next_latent_sg,
                                 method=network.value_from_latent,
                             )
+                            next_value_imagined = jnp.clip(
+                                next_value_imagined, -10.0, 10.0
+                            )
+                            imagined_target = (
+                                pred_reward_safe
+                                + config["GAMMA"]
+                                * (1.0 - done_prob)
+                                * next_value_imagined
+                            )
+                            imagined_target = jnp.clip(imagined_target, -10.0, 10.0)
+                            imagined_target = jax.lax.stop_gradient(imagined_target)
                             current_value_from_latent = network.apply(
                                 params,
                                 latent,
                                 method=network.value_from_latent,
                             )
-                            imagined_target = (
-                                pred_reward
-                                + config["GAMMA"]
-                                * (1.0 - done_prob)
-                                * next_value_imagined
+                            wm_imagined_value_loss = optax.huber_loss(
+                                current_value_from_latent,
+                                imagined_target,
+                                delta=1.0,
                             )
-                            imagined_target = jax.lax.stop_gradient(imagined_target)
-                            wm_imagined_value_loss = jnp.square(
-                                (current_value_from_latent - imagined_target) * not_done
+                            wm_imagined_value_loss = (
+                                wm_imagined_value_loss * not_done
                             ).mean()
                             wm_loss = (
                                 config["WM_FORWARD_COEF"] * wm_forward_loss
@@ -478,12 +489,20 @@ def make_train(config):
                         loss_actor = loss_actor.mean()
                         entropy = pi.entropy().mean()
 
+                        wm_imag_warmup_coef = jnp.minimum(
+                            1.0,
+                            update_step.astype(jnp.float32)
+                            / config["WM_IMAG_VALUE_WARMUP_UPDATES"],
+                        )
+
                         total_loss = (
                             loss_actor
                             + config["VF_COEF"] * value_loss
                             - config["ENT_COEF"] * entropy
                             + config["WM_COEF"] * wm_loss
-                            + config["WM_IMAG_VALUE_COEF"] * wm_imagined_value_loss
+                            + wm_imag_warmup_coef
+                            * config["WM_IMAG_VALUE_COEF"]
+                            * wm_imagined_value_loss
                         )
                         return total_loss, (
                             value_loss,
@@ -853,6 +872,7 @@ if __name__ == "__main__":
     parser.add_argument("--wm_inverse_coef", type=float, default=0.1)
     parser.add_argument("--wm_intrinsic_coef", type=float, default=0.01)
     parser.add_argument("--wm_imag_value_coef", type=float, default=0.1)
+    parser.add_argument("--wm_imag_value_warmup_updates", type=int, default=10)
 
     # EXPLORATION
     parser.add_argument("--exploration_update_epochs", type=int, default=4)
