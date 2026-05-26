@@ -330,7 +330,10 @@ def make_train(config):
                 if config["USE_TECH_TREE_BONUS"]:
                     new_achievements = env_state.env_state.achievements
                     new_achievement_delta = jnp.clip(
-                        new_achievements - old_achievements, 0.0, 1.0
+                        new_achievements.astype(jnp.float32)
+                        - old_achievements.astype(jnp.float32),
+                        0.0,
+                        1.0,
                     )
                     selected_delta = new_achievement_delta[
                         :, tech_tree_achievement_indices
