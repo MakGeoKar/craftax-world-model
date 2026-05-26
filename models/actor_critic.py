@@ -282,6 +282,12 @@ class ActorCriticConvWorldModel(nn.Module):
         pred_action_logits = self.inv_action(x)
         return pred_action_logits
 
+    def value_from_latent(self, latent):
+        critic_x = self.critic_fc1(latent)
+        critic_x = nn.relu(critic_x)
+        value = self.critic_out(critic_x)
+        return jnp.squeeze(value, axis=-1)
+
     def init_all(self, obs, action, next_obs):
         pi, value, latent = self(obs)
         _, _, next_latent = self(next_obs)

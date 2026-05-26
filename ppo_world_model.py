@@ -385,6 +385,7 @@ def make_train(config):
                             wm_reward_loss = 0.0
                             wm_done_loss = 0.0
                             wm_inverse_loss = 0.0
+                            wm_imagined_value_loss = 0.0
                         else:
                             pi, value, latent = network.apply(params, traj_batch.obs)
                             _, _, next_latent = network.apply(
@@ -422,6 +423,27 @@ def make_train(config):
                                     pred_action_logits, traj_batch.action
                                 ).mean()
                             )
+                            done_prob = jax.nn.sigmoid(pred_done_logit)
+                            next_value_imagined = network.apply(
+                                params,
+                                pred_next_latent,
+                                method=network.value_from_latent,
+                            )
+                            current_value_from_latent = network.apply(
+                                params,
+                                latent,
+                                method=network.value_from_latent,
+                            )
+                            imagined_target = (
+                                pred_reward
+                                + config["GAMMA"]
+                                * (1.0 - done_prob)
+                                * next_value_imagined
+                            )
+                            imagined_target = jax.lax.stop_gradient(imagined_target)
+                            wm_imagined_value_loss = jnp.square(
+                                (current_value_from_latent - imagined_target) * not_done
+                            ).mean()
                             wm_loss = (
                                 config["WM_FORWARD_COEF"] * wm_forward_loss
                                 + config["WM_REWARD_COEF"] * wm_reward_loss
@@ -461,6 +483,7 @@ def make_train(config):
                             + config["VF_COEF"] * value_loss
                             - config["ENT_COEF"] * entropy
                             + config["WM_COEF"] * wm_loss
+                            + config["WM_IMAG_VALUE_COEF"] * wm_imagined_value_loss
                         )
                         return total_loss, (
                             value_loss,
@@ -470,6 +493,7 @@ def make_train(config):
                             wm_reward_loss,
                             wm_done_loss,
                             wm_inverse_loss,
+                            wm_imagined_value_loss,
                         )
 
                     grad_fn = jax.value_and_grad(_loss_fn, has_aux=True)
@@ -828,6 +852,7 @@ if __name__ == "__main__":
     parser.add_argument("--wm_done_coef", type=float, default=0.1)
     parser.add_argument("--wm_inverse_coef", type=float, default=0.1)
     parser.add_argument("--wm_intrinsic_coef", type=float, default=0.01)
+    parser.add_argument("--wm_imag_value_coef", type=float, default=0.1)
 
     # EXPLORATION
     parser.add_argument("--exploration_update_epochs", type=int, default=4)
