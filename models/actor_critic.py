@@ -317,6 +317,14 @@ class ActorCriticConvWorldModel(nn.Module):
         value = self.critic_out(critic_x)
         return jnp.squeeze(value, axis=-1)
 
+    def policy_logits_from_latent(self, latent):
+        actor_x = self.actor_fc1(latent)
+        actor_x = nn.relu(actor_x)
+        actor_x = self.actor_fc2(actor_x)
+        actor_x = nn.relu(actor_x)
+        actor_logits = self.actor_out(actor_x)
+        return actor_logits
+
     def init_all(self, obs, action, next_obs):
         pi, value, latent = self(obs)
         _, _, next_latent = self(next_obs)

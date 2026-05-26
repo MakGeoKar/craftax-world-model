@@ -483,6 +483,7 @@ def make_train(config):
                             wm_reward_loss = 0.0
                             wm_done_loss = 0.0
                             wm_inverse_loss = 0.0
+                            wm_policy_consistency_loss = 0.0
                             wm_imagined_value_loss = 0.0
                         else:
                             pi, value, latent = network.apply(params, traj_batch.obs)
@@ -531,6 +532,27 @@ def make_train(config):
                                     pred_action_logits, traj_batch.action
                                 ).mean()
                             )
+                            pi_real_next, _, _ = network.apply(
+                                params, traj_batch.next_obs
+                            )
+                            imag_next_logits = network.apply(
+                                params,
+                                pred_next_latent,
+                                method=network.policy_logits_from_latent,
+                            )
+                            teacher_logits = jax.lax.stop_gradient(
+                                pi_real_next.logits
+                            )
+                            teacher_logits = teacher_logits - teacher_logits.mean(
+                                axis=-1, keepdims=True
+                            )
+                            imag_next_logits = imag_next_logits - imag_next_logits.mean(
+                                axis=-1, keepdims=True
+                            )
+                            wm_policy_consistency_loss = jnp.square(
+                                (imag_next_logits - teacher_logits)
+                                * not_done[..., None]
+                            ).mean()
                             done_prob = jax.nn.sigmoid(pred_done_logit)
                             pred_reward_safe = jnp.clip(pred_reward, -5.0, 5.0)
                             pred_next_latent_sg = jax.lax.stop_gradient(pred_next_latent)
@@ -612,6 +634,8 @@ def make_train(config):
                             + wm_imag_warmup_coef
                             * config["WM_IMAG_VALUE_COEF"]
                             * wm_imagined_value_loss
+                            + config["WM_POLICY_CONSISTENCY_COEF"]
+                            * wm_policy_consistency_loss
                         )
                         return total_loss, (
                             value_loss,
@@ -622,6 +646,7 @@ def make_train(config):
                             wm_reward_loss,
                             wm_done_loss,
                             wm_inverse_loss,
+                            wm_policy_consistency_loss,
                             wm_imagined_value_loss,
                         )
 
@@ -983,6 +1008,7 @@ if __name__ == "__main__":
     parser.add_argument("--wm_reward_coef", type=float, default=1.0)
     parser.add_argument("--wm_done_coef", type=float, default=0.1)
     parser.add_argument("--wm_inverse_coef", type=float, default=0.1)
+    parser.add_argument("--wm_policy_consistency_coef", type=float, default=0.005)
     parser.add_argument("--wm_intrinsic_coef", type=float, default=0.01)
     parser.add_argument("--use_annealed_intrinsic", action="store_true")
     parser.add_argument("--wm_intrinsic_start_coef", type=float, default=0.006)
