@@ -42,12 +42,14 @@ from models.latent_obs_decoder import LatentObsDecoder
 
 
 def normalize_obs(obs: jnp.ndarray) -> jnp.ndarray:
-    """Normalize Craftax pixel observations to [0, 1].
+    """Normalize Craftax pixel observations to [0, 1] in a JIT-safe way.
 
-    This function must be JIT-safe: no Python if on JAX arrays.
-    Craftax pixel observations are uint8 in [0, 255], so we always divide by 255.
+    If observations are integer pixels, divide by 255.
+    If observations are already float, assume they are already normalized.
     """
-    return obs.astype(jnp.float32) / 255.0
+    if jnp.issubdtype(obs.dtype, jnp.integer):
+        return obs.astype(jnp.float32) / 255.0
+    return jnp.clip(obs.astype(jnp.float32), 0.0, 1.0)
 
 
 def obs_to_hwc_image(obs: np.ndarray) -> np.ndarray:
@@ -312,6 +314,12 @@ def main(args):
     print(f"Collecting {args.num_collect_steps} observations...")
     obs_dataset = collect_observations(
         env, env_params, collect_rng, args.num_collect_steps
+    )
+    print(
+        "Collected obs raw range:",
+        float(jnp.min(obs_dataset)),
+        float(jnp.max(obs_dataset)),
+        obs_dataset.dtype,
     )
     obs_dataset = normalize_obs(obs_dataset)
 
