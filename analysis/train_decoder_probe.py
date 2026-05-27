@@ -100,15 +100,23 @@ def collect_observations(env, env_params, rng, num_steps: int) -> jnp.ndarray:
 
 
 def compute_metrics(obs, obs_hat):
-    l1 = float(jnp.mean(jnp.abs(obs_hat - obs)))
-    mse = float(jnp.mean(jnp.square(obs_hat - obs)))
-    per_channel = None
-    if obs.shape[-1] > 1:
-        per_channel = [
-            float(jnp.mean(jnp.abs(obs_hat[..., c] - obs[..., c])))
-            for c in range(obs.shape[-1])
-        ]
-    return {"l1": l1, "mse": mse, "per_channel_l1": per_channel}
+    """Return JIT-safe metric arrays (convert to Python outside jit)."""
+    l1 = jnp.mean(jnp.abs(obs_hat - obs))
+    mse = jnp.mean(jnp.square(obs_hat - obs))
+    per_channel_l1 = jnp.mean(jnp.abs(obs_hat - obs), axis=(0, 1, 2))
+    return {"l1": l1, "mse": mse, "per_channel_l1": per_channel_l1}
+
+
+def metrics_to_python(batch_metrics):
+    """Convert device-side metric arrays to Python scalars/lists for logging."""
+    batch_metrics = jax.device_get(batch_metrics)
+    return {
+        "l1": float(batch_metrics["l1"]),
+        "mse": float(batch_metrics["mse"]),
+        "loss": float(batch_metrics["loss"]),
+        "pixel_l1": float(batch_metrics["pixel_l1"]),
+        "per_channel_l1": np.asarray(batch_metrics["per_channel_l1"]).tolist(),
+    }
 
 
 def make_train_step(decoder_apply, wm_network, wm_params, repr_alpha: float):
@@ -141,8 +149,8 @@ def make_train_step(decoder_apply, wm_network, wm_params, repr_alpha: float):
         )(decoder_state.params)
         decoder_state = decoder_state.apply_gradients(grads=grads)
         metrics = compute_metrics(obs, obs_hat)
-        metrics["loss"] = float(loss)
-        metrics["pixel_l1"] = float(pixel_l1)
+        metrics["loss"] = loss
+        metrics["pixel_l1"] = pixel_l1
         return decoder_state, metrics
 
     return jax.jit(train_step)
@@ -322,25 +330,28 @@ def main(args):
         for epoch in range(1, args.train_epochs + 1):
             perm = np.random.permutation(obs_dataset.shape[0])
             epoch_l1, epoch_mse, epoch_loss = [], [], []
+            last_batch_metrics = None
 
             for start in range(0, obs_dataset.shape[0], args.batch_size):
                 batch_idx = perm[start : start + args.batch_size]
                 batch = obs_dataset[batch_idx]
                 decoder_state, batch_metrics = train_step(decoder_state, batch)
-                epoch_l1.append(batch_metrics["l1"])
-                epoch_mse.append(batch_metrics["mse"])
-                epoch_loss.append(batch_metrics["loss"])
+                batch_metrics_py = metrics_to_python(batch_metrics)
+                epoch_l1.append(batch_metrics_py["l1"])
+                epoch_mse.append(batch_metrics_py["mse"])
+                epoch_loss.append(batch_metrics_py["loss"])
+                last_batch_metrics = batch_metrics_py
 
             row = {
                 "epoch": epoch,
                 "loss": float(np.mean(epoch_loss)),
                 "l1": float(np.mean(epoch_l1)),
                 "mse": float(np.mean(epoch_mse)),
-                "per_channel_l1": batch_metrics["per_channel_l1"],
+                "per_channel_l1": last_batch_metrics["per_channel_l1"],
             }
             writer.writerow(row)
             per_ch = row["per_channel_l1"]
-            per_ch_str = f", per_channel_l1={per_ch}" if per_ch is not None else ""
+            per_ch_str = f", per_channel_l1={per_ch}" if per_ch else ""
             print(
                 f"epoch {epoch:03d}: loss={row['loss']:.6f}, "
                 f"l1={row['l1']:.6f}, mse={row['mse']:.6f}{per_ch_str}"
@@ -350,6 +361,9 @@ def main(args):
     viz_z = wm_network.apply(wm_params, viz_obs, method=wm_network.encode)
     viz_z = jax.lax.stop_gradient(viz_z)
     viz_hat = decoder.apply(decoder_state.params, viz_z)
+
+    viz_obs = jax.device_get(viz_obs)
+    viz_hat = jax.device_get(viz_hat)
 
     grid_path = output_dir / "decoder_reconstructions.png"
     save_reconstruction_grid(viz_obs, viz_hat, grid_path, args.num_viz_samples)
