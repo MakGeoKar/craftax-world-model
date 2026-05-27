@@ -18,6 +18,13 @@ import sys
 from pathlib import Path
 
 import jax
+import jax.tree_util
+
+# Compatibility patch for newer JAX versions:
+# gymnax/craftax may still call jax.tree_map, removed in JAX >= 0.6.0.
+if not hasattr(jax, "tree_map"):
+    jax.tree_map = jax.tree_util.tree_map
+
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
@@ -35,13 +42,12 @@ from models.latent_obs_decoder import LatentObsDecoder
 
 
 def normalize_obs(obs: jnp.ndarray) -> jnp.ndarray:
-    """Convert observations to float32 in [0, 1], keeping NHWC layout."""
-    obs = jnp.asarray(obs, dtype=jnp.float32)
-    if obs.ndim == 3:
-        obs = obs[None, ...]
-    if obs.max() > 1.0:
-        obs = obs / 255.0
-    return jnp.clip(obs, 0.0, 1.0)
+    """Normalize Craftax pixel observations to [0, 1].
+
+    This function must be JIT-safe: no Python if on JAX arrays.
+    Craftax pixel observations are uint8 in [0, 255], so we always divide by 255.
+    """
+    return obs.astype(jnp.float32) / 255.0
 
 
 def obs_to_hwc_image(obs: np.ndarray) -> np.ndarray:
