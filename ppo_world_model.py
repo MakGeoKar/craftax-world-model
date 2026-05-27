@@ -385,6 +385,7 @@ def make_train(config):
                             wm_reward_loss = 0.0
                             wm_done_loss = 0.0
                             wm_inverse_loss = 0.0
+                            wm_cpc_loss = 0.0
                         else:
                             pi, value, latent = network.apply(params, traj_batch.obs)
                             _, _, next_latent = network.apply(
@@ -422,12 +423,48 @@ def make_train(config):
                                     pred_action_logits, traj_batch.action
                                 ).mean()
                             )
+                            if config["USE_WM_CPC"]:
+                                pred_flat = pred_next_latent.reshape(
+                                    (-1, pred_next_latent.shape[-1])
+                                )
+                                target_flat = next_latent_target.reshape(
+                                    (-1, next_latent_target.shape[-1])
+                                )
+                                mask_flat = not_done.reshape((-1,))
+                                pred_norm = pred_flat / (
+                                    jnp.linalg.norm(pred_flat, axis=-1, keepdims=True)
+                                    + 1e-8
+                                )
+                                target_norm = jax.lax.stop_gradient(
+                                    target_flat
+                                    / (
+                                        jnp.linalg.norm(
+                                            target_flat, axis=-1, keepdims=True
+                                        )
+                                        + 1e-8
+                                    )
+                                )
+                                logits = pred_norm @ target_norm.T
+                                logits = logits / config["WM_CPC_TEMPERATURE"]
+                                labels = jnp.arange(logits.shape[0])
+                                cpc_per_sample = (
+                                    optax.softmax_cross_entropy_with_integer_labels(
+                                        logits, labels
+                                    )
+                                )
+                                wm_cpc_loss = (cpc_per_sample * mask_flat).sum() / (
+                                    mask_flat.sum() + 1e-8
+                                )
+                            else:
+                                wm_cpc_loss = 0.0
                             wm_loss = (
                                 config["WM_FORWARD_COEF"] * wm_forward_loss
                                 + config["WM_REWARD_COEF"] * wm_reward_loss
                                 + config["WM_DONE_COEF"] * wm_done_loss
                                 + config["WM_INVERSE_COEF"] * wm_inverse_loss
                             )
+                            if config["USE_WM_CPC"]:
+                                wm_loss = wm_loss + config["WM_CPC_COEF"] * wm_cpc_loss
                         log_prob = pi.log_prob(traj_batch.action)
 
                         # CALCULATE VALUE LOSS
@@ -470,6 +507,7 @@ def make_train(config):
                             wm_reward_loss,
                             wm_done_loss,
                             wm_inverse_loss,
+                            wm_cpc_loss,
                         )
 
                     grad_fn = jax.value_and_grad(_loss_fn, has_aux=True)
@@ -827,6 +865,9 @@ if __name__ == "__main__":
     parser.add_argument("--wm_reward_coef", type=float, default=1.0)
     parser.add_argument("--wm_done_coef", type=float, default=0.1)
     parser.add_argument("--wm_inverse_coef", type=float, default=0.1)
+    parser.add_argument("--use_wm_cpc", action="store_true")
+    parser.add_argument("--wm_cpc_coef", type=float, default=0.1)
+    parser.add_argument("--wm_cpc_temperature", type=float, default=0.1)
     parser.add_argument("--wm_intrinsic_coef", type=float, default=0.01)
 
     # EXPLORATION
