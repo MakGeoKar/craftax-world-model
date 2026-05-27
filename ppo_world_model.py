@@ -12,6 +12,7 @@ from craftax.craftax_env import make_craftax_env_from_name
 import wandb
 from typing import NamedTuple
 
+from flax.serialization import to_bytes
 from flax.training import orbax_utils
 from flax.training.train_state import TrainState
 from orbax.checkpoint import (
@@ -759,6 +760,16 @@ def run_ppo(config):
     print("Time to run experiment", t1 - t0)
     print("SPS: ", config["TOTAL_TIMESTEPS"] / (t1 - t0))
 
+    if config["SAVE_PARAMS_PATH"] is not None:
+        train_states = out["runner_state"][0]
+        final_train_state = jax.tree.map(lambda x: x[0], train_states)
+        params = jax.device_get(final_train_state.params)
+        save_path = config["SAVE_PARAMS_PATH"]
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        with open(save_path, "wb") as f:
+            f.write(to_bytes(params))
+        print(f"Saved trained params to {save_path}")
+
     if config["USE_WANDB"]:
 
         def _save_network(rs_index, dir_name):
@@ -812,6 +823,7 @@ if __name__ == "__main__":
         "--use_wandb", action=argparse.BooleanOptionalAction, default=True
     )
     parser.add_argument("--save_policy", action="store_true")
+    parser.add_argument("--save_params_path", type=str, default=None)
     parser.add_argument("--num_repeats", type=int, default=1)
     parser.add_argument("--layer_size", type=int, default=512)
     parser.add_argument("--wandb_project", type=str)
