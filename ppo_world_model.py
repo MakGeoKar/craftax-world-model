@@ -75,6 +75,8 @@ def make_train(config):
         env = AutoResetEnvWrapper(env)
         env = BatchEnvWrapper(env, num_envs=config["NUM_ENVS"])
 
+    action_dim = env.action_space(env_params).n
+
     def linear_schedule(count):
         frac = (
             1.0
@@ -386,6 +388,8 @@ def make_train(config):
                             wm_reward_loss = 0.0
                             wm_done_loss = 0.0
                             wm_inverse_loss = 0.0
+                            wm_imagined_actor_loss = 0.0
+                            imagined_actor_coef = 0.0
                         else:
                             pi, value, latent = network.apply(params, traj_batch.obs)
                             _, _, next_latent = network.apply(
@@ -429,6 +433,85 @@ def make_train(config):
                                 + config["WM_DONE_COEF"] * wm_done_loss
                                 + config["WM_INVERSE_COEF"] * wm_inverse_loss
                             )
+                            if config["WM_IMAGINED_ACTOR_COEF"] > 0.0:
+                                batch_size = latent.shape[0]
+                                all_actions = jnp.arange(action_dim, dtype=jnp.int32)
+                                latent_all = jnp.repeat(latent, action_dim, axis=0)
+                                actions_all = jnp.tile(all_actions, batch_size)
+                                pred_z_all, pred_reward_all, pred_done_logit_all = (
+                                    network.apply(
+                                        params,
+                                        latent_all,
+                                        actions_all,
+                                        method=network.world_model,
+                                    )
+                                )
+                                pred_value_all = network.apply(
+                                    params,
+                                    pred_z_all,
+                                    method=network.critic_from_latent,
+                                )
+                                pred_reward_ba = pred_reward_all.reshape(
+                                    batch_size, action_dim
+                                )
+                                pred_done_prob_ba = jax.nn.sigmoid(
+                                    pred_done_logit_all
+                                ).reshape(batch_size, action_dim)
+                                pred_value_ba = pred_value_all.reshape(
+                                    batch_size, action_dim
+                                )
+                                q_model = (
+                                    pred_reward_ba
+                                    + config["GAMMA"]
+                                    * (1.0 - pred_done_prob_ba)
+                                    * pred_value_ba
+                                )
+                                q_model_target = jax.lax.stop_gradient(q_model)
+                                idm_logits_all = network.apply(
+                                    params,
+                                    latent_all,
+                                    pred_z_all,
+                                    method=network.inverse_model,
+                                )
+                                idm_probs_all = jax.nn.softmax(idm_logits_all, axis=-1)
+                                inv_conf_all = jnp.take_along_axis(
+                                    idm_probs_all,
+                                    actions_all[:, None],
+                                    axis=-1,
+                                ).squeeze(-1)
+                                inv_conf = inv_conf_all.reshape(batch_size, action_dim)
+                                inv_conf_target = jax.lax.stop_gradient(inv_conf)
+                                trusted_logits = (
+                                    q_model_target
+                                    / config["WM_IMAGINED_ACTOR_TEMPERATURE"]
+                                    + config["WM_IMAGINED_ACTOR_IDM_BETA"]
+                                    * jnp.log(inv_conf_target + 1e-8)
+                                )
+                                target_probs = jax.lax.stop_gradient(
+                                    jax.nn.softmax(trusted_logits, axis=-1)
+                                )
+                                pi_current = network.apply(
+                                    params, latent, method=network.actor_from_latent
+                                )
+                                actor_log_probs = jax.nn.log_softmax(pi_current.logits)
+                                wm_imagined_actor_loss = -jnp.mean(
+                                    jnp.sum(target_probs * actor_log_probs, axis=-1)
+                                )
+                                imagined_progress = update_step / config["NUM_UPDATES"]
+                                imagined_start = config["WM_IMAGINED_ACTOR_WARMUP_FRAC"]
+                                imagined_ramp = config["WM_IMAGINED_ACTOR_RAMP_FRAC"]
+                                imagined_anneal = jnp.clip(
+                                    (imagined_progress - imagined_start)
+                                    / jnp.maximum(imagined_ramp, 1e-8),
+                                    0.0,
+                                    1.0,
+                                )
+                                imagined_actor_coef = (
+                                    config["WM_IMAGINED_ACTOR_COEF"] * imagined_anneal
+                                )
+                            else:
+                                wm_imagined_actor_loss = 0.0
+                                imagined_actor_coef = 0.0
                         log_prob = pi.log_prob(traj_batch.action)
 
                         # CALCULATE VALUE LOSS
@@ -462,6 +545,7 @@ def make_train(config):
                             + config["VF_COEF"] * value_loss
                             - config["ENT_COEF"] * entropy
                             + config["WM_COEF"] * wm_loss
+                            + imagined_actor_coef * wm_imagined_actor_loss
                         )
                         return total_loss, (
                             value_loss,
@@ -471,6 +555,7 @@ def make_train(config):
                             wm_reward_loss,
                             wm_done_loss,
                             wm_inverse_loss,
+                            wm_imagined_actor_loss,
                         )
 
                     grad_fn = jax.value_and_grad(_loss_fn, has_aux=True)
@@ -840,6 +925,11 @@ if __name__ == "__main__":
     parser.add_argument("--wm_done_coef", type=float, default=0.1)
     parser.add_argument("--wm_inverse_coef", type=float, default=0.1)
     parser.add_argument("--wm_intrinsic_coef", type=float, default=0.01)
+    parser.add_argument("--wm_imagined_actor_coef", type=float, default=0.0)
+    parser.add_argument("--wm_imagined_actor_warmup_frac", type=float, default=0.5)
+    parser.add_argument("--wm_imagined_actor_ramp_frac", type=float, default=0.2)
+    parser.add_argument("--wm_imagined_actor_temperature", type=float, default=1.0)
+    parser.add_argument("--wm_imagined_actor_idm_beta", type=float, default=1.0)
 
     # EXPLORATION
     parser.add_argument("--exploration_update_epochs", type=int, default=4)

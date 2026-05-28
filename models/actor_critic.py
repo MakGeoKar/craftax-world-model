@@ -257,6 +257,20 @@ class ActorCriticConvWorldModel(nn.Module):
 
         return pi, jnp.squeeze(value, axis=-1), latent
 
+    def actor_from_latent(self, latent):
+        actor_x = self.actor_fc1(latent)
+        actor_x = nn.relu(actor_x)
+        actor_x = self.actor_fc2(actor_x)
+        actor_x = nn.relu(actor_x)
+        actor_logits = self.actor_out(actor_x)
+        return distrax.Categorical(logits=actor_logits)
+
+    def critic_from_latent(self, latent):
+        critic_x = self.critic_fc1(latent)
+        critic_x = nn.relu(critic_x)
+        value = self.critic_out(critic_x)
+        return jnp.squeeze(value, axis=-1)
+
     def world_model(self, latent, action):
         action_onehot = jax.nn.one_hot(action, self.action_dim)
         x = jnp.concatenate([latent, action_onehot], axis=-1)
