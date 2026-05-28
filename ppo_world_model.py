@@ -51,6 +51,22 @@ class Transition(NamedTuple):
     info: jnp.ndarray
 
 
+ACTOR_HEAD_PARAM_KEYS = ("actor_fc1", "actor_fc2", "actor_out")
+
+
+def freeze_actor_head_params(params):
+    """Stop-gradient only actor-head weights; keep WM/encoder/critic trainable."""
+    frozen_inner = {
+        key: (
+            jax.tree.map(jax.lax.stop_gradient, value)
+            if key in ACTOR_HEAD_PARAM_KEYS
+            else value
+        )
+        for key, value in params["params"].items()
+    }
+    return {"params": frozen_inner}
+
+
 def make_train(config):
     config["NUM_UPDATES"] = (
         config["TOTAL_TIMESTEPS"] // config["NUM_STEPS"] // config["NUM_ENVS"]
@@ -386,6 +402,7 @@ def make_train(config):
                             wm_reward_loss = 0.0
                             wm_done_loss = 0.0
                             wm_inverse_loss = 0.0
+                            wm_policy_consistency_loss = 0.0
                         else:
                             pi, value, latent = network.apply(params, traj_batch.obs)
                             _, _, next_latent = network.apply(
@@ -423,11 +440,39 @@ def make_train(config):
                                     pred_action_logits, traj_batch.action
                                 ).mean()
                             )
+                            # Actor head is a frozen evaluator here: this auxiliary
+                            # loss shapes WM predicted latents without updating PPO actor.
+                            actor_frozen_params = freeze_actor_head_params(params)
+                            pi_real_next = network.apply(
+                                actor_frozen_params,
+                                next_latent_target,
+                                method=network.actor_from_latent,
+                            )
+                            pi_pred_next = network.apply(
+                                actor_frozen_params,
+                                pred_next_latent,
+                                method=network.actor_from_latent,
+                            )
+                            target_probs = jax.lax.stop_gradient(pi_real_next.probs)
+                            pred_log_probs = jax.nn.log_softmax(pi_pred_next.logits)
+                            wm_policy_consistency_loss = -jnp.mean(
+                                jnp.sum(target_probs * pred_log_probs, axis=-1)
+                            )
+                            progress = update_step / config["NUM_UPDATES"]
+                            start = config["WM_POLICY_CONSISTENCY_WARMUP_FRAC"]
+                            ramp = config["WM_POLICY_CONSISTENCY_RAMP_FRAC"]
+                            anneal = jnp.clip(
+                                (progress - start) / jnp.maximum(ramp, 1e-8), 0.0, 1.0
+                            )
+                            effective_coef = (
+                                config["WM_POLICY_CONSISTENCY_COEF"] * anneal
+                            )
                             wm_loss = (
                                 config["WM_FORWARD_COEF"] * wm_forward_loss
                                 + config["WM_REWARD_COEF"] * wm_reward_loss
                                 + config["WM_DONE_COEF"] * wm_done_loss
                                 + config["WM_INVERSE_COEF"] * wm_inverse_loss
+                                + effective_coef * wm_policy_consistency_loss
                             )
                         log_prob = pi.log_prob(traj_batch.action)
 
@@ -471,6 +516,7 @@ def make_train(config):
                             wm_reward_loss,
                             wm_done_loss,
                             wm_inverse_loss,
+                            wm_policy_consistency_loss,
                         )
 
                     grad_fn = jax.value_and_grad(_loss_fn, has_aux=True)
@@ -840,6 +886,9 @@ if __name__ == "__main__":
     parser.add_argument("--wm_done_coef", type=float, default=0.1)
     parser.add_argument("--wm_inverse_coef", type=float, default=0.1)
     parser.add_argument("--wm_intrinsic_coef", type=float, default=0.01)
+    parser.add_argument("--wm_policy_consistency_coef", type=float, default=0.0)
+    parser.add_argument("--wm_policy_consistency_warmup_frac", type=float, default=0.3)
+    parser.add_argument("--wm_policy_consistency_ramp_frac", type=float, default=0.3)
 
     # EXPLORATION
     parser.add_argument("--exploration_update_epochs", type=int, default=4)
