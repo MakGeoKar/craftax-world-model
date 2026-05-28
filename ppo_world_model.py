@@ -481,11 +481,24 @@ def make_train(config):
                                 ).squeeze(-1)
                                 inv_conf = inv_conf_all.reshape(batch_size, action_dim)
                                 inv_conf_target = jax.lax.stop_gradient(inv_conf)
-                                trusted_logits = (
+                                raw_trusted_logits = (
                                     q_model_target
                                     / config["WM_IMAGINED_ACTOR_TEMPERATURE"]
                                     + config["WM_IMAGINED_ACTOR_IDM_BETA"]
                                     * jnp.log(inv_conf_target + 1e-8)
+                                )
+                                valid_actions = (
+                                    inv_conf_target
+                                    >= config["WM_IMAGINED_ACTOR_IDM_THRESHOLD"]
+                                )
+                                any_valid = jnp.any(valid_actions, axis=-1, keepdims=True)
+                                masked_logits = jnp.where(
+                                    valid_actions,
+                                    raw_trusted_logits,
+                                    config["WM_IMAGINED_ACTOR_INVALID_LOGIT"],
+                                )
+                                trusted_logits = jnp.where(
+                                    any_valid, masked_logits, raw_trusted_logits
                                 )
                                 target_probs = jax.lax.stop_gradient(
                                     jax.nn.softmax(trusted_logits, axis=-1)
@@ -930,6 +943,8 @@ if __name__ == "__main__":
     parser.add_argument("--wm_imagined_actor_ramp_frac", type=float, default=0.2)
     parser.add_argument("--wm_imagined_actor_temperature", type=float, default=1.0)
     parser.add_argument("--wm_imagined_actor_idm_beta", type=float, default=1.0)
+    parser.add_argument("--wm_imagined_actor_idm_threshold", type=float, default=0.0)
+    parser.add_argument("--wm_imagined_actor_invalid_logit", type=float, default=-1e9)
 
     # EXPLORATION
     parser.add_argument("--exploration_update_epochs", type=int, default=4)
