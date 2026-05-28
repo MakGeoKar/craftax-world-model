@@ -128,11 +128,27 @@ class ActorCriticConv(nn.Module):
 
 
 class ActorCriticConvWorldModel(nn.Module):
+    """Conv actor-critic with an auxiliary latent world model.
+
+    Single shared CNN encoder maps a pixel observation to a flat latent. The
+    latent feeds three heads:
+      - actor / critic (PPO policy and value),
+      - world model: (latent, action) -> next latent, reward, done logit,
+      - inverse model: (latent, next_latent) -> action logits.
+
+    The world model operates purely in latent space (no pixel decoding); its
+    forward prediction error is used as an intrinsic exploration reward and as
+    an auxiliary representation-learning loss during PPO updates.
+    """
+
     action_dim: Sequence[int]
     layer_width: int
     activation: str = "tanh"
 
     def setup(self):
+        # NOTE: layer `name=` strings are part of the saved param tree; do not
+        # rename them or existing checkpoints will fail to load.
+        # --- CNN encoder: obs -> flat latent ---
         self.enc_conv1 = nn.Conv(
             features=32, kernel_size=(5, 5), name="enc_conv1"
         )
@@ -149,6 +165,7 @@ class ActorCriticConvWorldModel(nn.Module):
             name="enc_latent",
         )
 
+        # --- Actor head: latent -> action logits ---
         self.actor_fc1 = nn.Dense(
             self.layer_width,
             kernel_init=orthogonal(2),
@@ -168,6 +185,7 @@ class ActorCriticConvWorldModel(nn.Module):
             name="actor_out",
         )
 
+        # --- Critic head: latent -> scalar value ---
         self.critic_fc1 = nn.Dense(
             self.layer_width,
             kernel_init=orthogonal(2),
@@ -181,6 +199,7 @@ class ActorCriticConvWorldModel(nn.Module):
             name="critic_out",
         )
 
+        # --- World model head: (latent, action) -> next latent, reward, done ---
         self.wm_fc1 = nn.Dense(
             self.layer_width,
             kernel_init=orthogonal(2),
@@ -212,6 +231,7 @@ class ActorCriticConvWorldModel(nn.Module):
             name="wm_done",
         )
 
+        # --- Inverse dynamics head: (latent, next_latent) -> action logits ---
         self.inv_fc1 = nn.Dense(
             self.layer_width,
             kernel_init=orthogonal(2),
@@ -226,6 +246,7 @@ class ActorCriticConvWorldModel(nn.Module):
         )
 
     def encode(self, obs):
+        """Encode a batch of pixel observations [B, H, W, C] into latents [B, layer_width]."""
         x = self.enc_conv1(obs)
         x = nn.relu(x)
         x = nn.max_pool(x, window_shape=(3, 3), strides=(3, 3))
@@ -242,6 +263,7 @@ class ActorCriticConvWorldModel(nn.Module):
         return latent
 
     def __call__(self, obs):
+        """Run encoder + actor + critic. Returns (pi, value, latent)."""
         latent = self.encode(obs)
 
         actor_x = self.actor_fc1(latent)
@@ -258,6 +280,11 @@ class ActorCriticConvWorldModel(nn.Module):
         return pi, jnp.squeeze(value, axis=-1), latent
 
     def world_model(self, latent, action):
+        """Predict one latent transition from (latent, action).
+
+        Returns (pred_next_latent, pred_reward, pred_done_logit). Call via
+        `network.apply(params, latent, action, method=network.world_model)`.
+        """
         action_onehot = jax.nn.one_hot(action, self.action_dim)
         x = jnp.concatenate([latent, action_onehot], axis=-1)
         x = self.wm_fc1(x)
@@ -276,6 +303,7 @@ class ActorCriticConvWorldModel(nn.Module):
         )
 
     def inverse_model(self, latent, next_latent):
+        """Predict the action logits that explain the (latent -> next_latent) transition."""
         x = jnp.concatenate([latent, next_latent], axis=-1)
         x = self.inv_fc1(x)
         x = nn.relu(x)
@@ -283,6 +311,10 @@ class ActorCriticConvWorldModel(nn.Module):
         return pred_action_logits
 
     def init_all(self, obs, action, next_obs):
+        """Initialization entry point that touches every head so all params are created.
+
+        Used as `network.init(rng, obs, action, next_obs, method=network.init_all)`.
+        """
         pi, value, latent = self(obs)
         _, _, next_latent = self(next_obs)
         self.world_model(latent, action)

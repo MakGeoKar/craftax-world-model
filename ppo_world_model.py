@@ -1,3 +1,17 @@
+"""World-model-augmented PPO for Craftax.
+
+Pixel envs use `ActorCriticConvWorldModel`: a shared CNN encoder produces a
+latent that drives the PPO actor/critic and an auxiliary latent world model.
+The world model's one-step latent prediction error is added to the external
+reward as an intrinsic exploration bonus, and the WM heads are trained jointly
+with PPO as auxiliary losses. Symbolic envs fall back to the plain `ActorCritic`
+with no world model.
+
+High-level flow (see CODE_WALKTHROUGH.md for details):
+  make_train -> env wrappers -> rollout (_env_step) -> GAE -> PPO + WM losses
+  (_loss_fn) -> optimizer update -> repeat for NUM_UPDATES.
+"""
+
 import argparse
 import os
 import sys
@@ -39,16 +53,23 @@ from wrappers import (
 
 
 class Transition(NamedTuple):
+    """One env step stored during rollout, stacked over NUM_STEPS by lax.scan.
+
+    reward_e is the external (env) reward, reward_i the WM intrinsic bonus, and
+    reward = reward_e + reward_i is what GAE/PPO actually optimize. `info`
+    carries env metrics (e.g. returned_episode_returns) used only for reporting.
+    """
+
     done: jnp.ndarray
     action: jnp.ndarray
     value: jnp.ndarray
-    reward_e: jnp.ndarray
-    reward_i: jnp.ndarray
-    reward: jnp.ndarray
+    reward_e: jnp.ndarray  # external reward from the environment
+    reward_i: jnp.ndarray  # intrinsic WM (or ICM/E3B) exploration bonus
+    reward: jnp.ndarray  # reward_e + reward_i; the PPO training signal
     log_prob: jnp.ndarray
     obs: jnp.ndarray
     next_obs: jnp.ndarray
-    info: jnp.ndarray
+    info: jnp.ndarray  # env-reported metrics (no intrinsic reward)
 
 
 def make_train(config):
@@ -241,10 +262,13 @@ def make_train(config):
                     _rng, env_state, action, env_params
                 )
 
+                # INTRINSIC REWARD: WM one-step latent prediction error.
+                # Higher error == more "surprising" transition == more bonus.
                 reward_i = jnp.zeros(config["NUM_ENVS"])
                 if "Symbolic" not in config["ENV_NAME"]:
                     _, _, latent = network.apply(train_state.params, last_obs)
                     _, _, next_latent = network.apply(train_state.params, obsv)
+                    # Target latent is stop-gradient (encoder not trained by the bonus).
                     next_latent = jax.lax.stop_gradient(next_latent)
                     pred_next_latent, _, _ = network.apply(
                         train_state.params,
@@ -255,6 +279,7 @@ def make_train(config):
                     pred_error = jnp.square(pred_next_latent - next_latent).mean(
                         axis=-1
                     )
+                    # Zero out the bonus on terminal steps (no valid next latent).
                     pred_error = pred_error * (1.0 - done)
                     reward_i = config["WM_INTRINSIC_COEF"] * pred_error
 
@@ -306,6 +331,8 @@ def make_train(config):
 
                         reward_i = e3b_bonus * config["E3B_REWARD_COEFF"]
 
+                # PPO optimizes the combined reward; reward_e/reward_i kept
+                # separately for logging and for the WM reward-loss target.
                 reward = reward_e + reward_i
 
                 transition = Transition(
@@ -346,6 +373,8 @@ def make_train(config):
             _, last_val = policy_apply(train_state.params, last_obs)
 
             def _calculate_gae(traj_batch, last_val):
+                # Standard GAE(lambda) computed backwards over the rollout.
+                # Uses transition.reward (= external + intrinsic).
                 def _get_advantages(gae_and_next_value, transition):
                     gae, next_value = gae_and_next_value
                     done, value, reward = (
@@ -387,10 +416,14 @@ def make_train(config):
                             wm_done_loss = 0.0
                             wm_inverse_loss = 0.0
                         else:
+                            # Pixel path: PPO heads + auxiliary world-model losses.
                             pi, value, latent = network.apply(params, traj_batch.obs)
                             _, _, next_latent = network.apply(
                                 params, traj_batch.next_obs
                             )
+                            # WM forward/inverse targets use the encoder output of
+                            # next_obs, detached so these losses train the WM heads
+                            # (and encoder via `latent`) but not the target encoder.
                             next_latent_target = jax.lax.stop_gradient(next_latent)
                             pred_next_latent, pred_reward, pred_done_logit = (
                                 network.apply(
@@ -406,6 +439,11 @@ def make_train(config):
                                 next_latent_target,
                                 method=network.inverse_model,
                             )
+                            # WM aux losses (terminal steps masked out by not_done):
+                            #   forward: predict next latent (MSE)
+                            #   reward:  predict external reward (MSE)
+                            #   done:    predict terminal flag (BCE)
+                            #   inverse: recover action from (latent, next_latent)
                             not_done = 1.0 - traj_batch.done
                             wm_forward_loss = jnp.square(
                                 (pred_next_latent - next_latent_target)
@@ -457,6 +495,8 @@ def make_train(config):
                         loss_actor = loss_actor.mean()
                         entropy = pi.entropy().mean()
 
+                        # Total = PPO clipped actor + clipped value - entropy bonus
+                        #         + weighted world-model aux loss (0 for symbolic).
                         total_loss = (
                             loss_actor
                             + config["VF_COEF"] * value_loss
@@ -532,6 +572,9 @@ def make_train(config):
             )
 
             train_state = update_state[0]
+            # Reported metrics are episode-averaged env `info` values (e.g.
+            # returned_episode_returns / score). These reflect external reward
+            # only and exclude the intrinsic WM bonus used during training.
             metric = jax.tree.map(
                 lambda x: (x * traj_batch.info["returned_episode"]).sum()
                 / traj_batch.info["returned_episode"].sum(),
@@ -761,6 +804,8 @@ def run_ppo(config):
     print("SPS: ", config["TOTAL_TIMESTEPS"] / (t1 - t0))
 
     if config["SAVE_PARAMS_PATH"] is not None:
+        # Persist final params of the first repeat as a flax msgpack blob,
+        # consumable by the decoder-probe / visualization scripts.
         train_states = out["runner_state"][0]
         final_train_state = jax.tree.map(lambda x: x[0], train_states)
         params = jax.device_get(final_train_state.params)
