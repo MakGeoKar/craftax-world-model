@@ -216,7 +216,7 @@ def main(args):
         rng, act_rng, step_rng = jax.random.split(rng, 3)
 
         pi, _, latent_t = network.apply(params, obs_t[None, ...])
-        action = int(pi.sample(seed=act_rng))
+        action = int(np.asarray(jax.device_get(pi.sample(seed=act_rng))).reshape(-1)[0])
 
         obs_next, env_state, reward, done, info = env.step(
             step_rng, env_state, action, env_params
